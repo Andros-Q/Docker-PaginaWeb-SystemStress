@@ -1,0 +1,44 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model StressLog {
+  id          Int       @id @default(autoincrement())
+  type        String    // "cpu" | "memory" | "db" | "combined"
+  intensity   Int       // 1-100
+  startedAt   DateTime  @default(now())
+  endedAt     DateTime?
+  status      String    // "running" | "stopped" | "completed" | "error"
+  metrics     Json?     // Snapshot de métricas
+}
+
+model HeavyRecord {
+  id        Int      @id @default(autoincrement())
+  data      String   // Texto largo para forzar uso de disco/memoria en DB
+  checksum  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdAt])
+}
+
+model ConnectionTest {
+  id        Int      @id @default(autoincrement())
+  sessionId String
+  query     String
+  duration  Int      // ms
+  createdAt DateTime @default(now())
+}
+
+
+model StressData {
+  id        Int      @id @default(autoincrement())
+  data      String   @db.Text
+  number    Int
+  createdAt DateTime @default(now())
+}

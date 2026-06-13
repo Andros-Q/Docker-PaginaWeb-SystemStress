@@ -1,0 +1,64 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    # VOLUMES COMENTADOS PARA PRODUCCIÓN:
+    # volumes:
+    #   - .:/app
+    #   - /app/node_modules
+    #   - /app/.next
+    environment:
+      - DATABASE_URL=postgresql://...
+
+# --- CONTENEDOR 2: BASE DE DATOS (POSTGRESQL) ---
+  base_datos_pg:
+    image: postgres:16
+    container_name: stress-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: stress_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - stress-net
+    restart: unless-stopped
+
+  # --- CONTENEDOR 3: ADMINISTRADOR DE BD (PGADMIN) ---
+  administrador_pg:
+    image: dpage/pgadmin4:8.5
+    container_name: stress-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: "admin@univalle.edu.co"
+      PGADMIN_DEFAULT_PASSWORD: "admin"
+    ports:
+      - "5050:80"
+    networks:
+      - stress-net
+    restart: unless-stopped
+
+  # --- CONTENEDOR 4: ENTORNO DE IA (JUPYTERLAB) ---
+  jupyter_lab:
+    image: jupyter/scipy-notebook:latest
+    container_name: stress-ai-lab
+    user: root
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+    volumes:
+      - .:/home/jovyan/work
+    ports:
+      - "8888:8888"
+    networks:
+      - stress-net
+    restart: unless-stopped
+
+networks:
+  stress-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+    driver: local
