@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -8,13 +9,13 @@ datasource db {
 }
 
 model StressLog {
-  id          Int       @id @default(autoincrement())
-  type        String    // "cpu" | "memory" | "db" | "combined"
-  intensity   Int       // 1-100
-  startedAt   DateTime  @default(now())
-  endedAt     DateTime?
-  status      String    // "running" | "stopped" | "completed" | "error"
-  metrics     Json?     // Snapshot de métricas
+  id        Int       @id @default(autoincrement())
+  type      String    // "cpu" | "memory" | "db" | "combined"
+  intensity Int       // 1-100
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  status    String    // "running" | "stopped" | "completed" | "error"
+  metrics   Json?     // Snapshot de métricas
 }
 
 model HeavyRecord {
@@ -34,7 +35,6 @@ model ConnectionTest {
   duration  Int      // ms
   createdAt DateTime @default(now())
 }
-
 
 model StressData {
   id        Int      @id @default(autoincrement())

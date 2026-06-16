@@ -1,64 +1,74 @@
 services:
+  # Servidor Web de Next.js (El cuartel general del ataque)
   app:
-    build: .
+    container_name: stress-app
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "3000:3000"
-    # VOLUMES COMENTADOS PARA PRODUCCIÓN:
-    # volumes:
-    #   - .:/app
-    #   - /app/node_modules
-    #   - /app/.next
     environment:
-      - DATABASE_URL=postgresql://...
+      - DATABASE_URL=postgresql://postgres:postgres@stress-db:5432/stress_db?schema=public
+      - NODE_ENV=production
+    depends_on:
+      stress-db:
+        condition: service_healthy
+    networks:
+      - stress-net  # 👈 Conectado a la red
 
-# --- CONTENEDOR 2: BASE DE DATOS (POSTGRESQL) ---
-  base_datos_pg:
-    image: postgres:16
+  # Base de Datos PostgreSQL
+  stress-db:
     container_name: stress-db
+    image: postgres:16
+    restart: always
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: stress_db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=stress_db
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stress_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     networks:
-      - stress-net
-    restart: unless-stopped
+      - stress-net  # 👈 Conectado a la red
 
-  # --- CONTENEDOR 3: ADMINISTRADOR DE BD (PGADMIN) ---
-  administrador_pg:
-    image: dpage/pgadmin4:8.5
+  # Administrador Visual de la Base de Datos (pgAdmin)
+  stress-pgadmin:
     container_name: stress-pgadmin
+    image: dpage/pgadmin4:8.5
+    restart: always
     environment:
-      PGADMIN_DEFAULT_EMAIL: "admin@univalle.edu.co"
-      PGADMIN_DEFAULT_PASSWORD: "admin"
+      - PGADMIN_DEFAULT_EMAIL=admin@admin.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
     ports:
       - "5050:80"
+    depends_on:
+      - stress-db
     networks:
-      - stress-net
-    restart: unless-stopped
+      - stress-net  # 👈 Conectado a la red
 
-  # --- CONTENEDOR 4: ENTORNO DE IA (JUPYTERLAB) ---
+  # Laboratorio de Analítica de Datos (Jupyter Notebook)
   jupyter_lab:
-    image: jupyter/scipy-notebook:latest
     container_name: stress-ai-lab
-    user: root
-    environment:
-      - JUPYTER_ENABLE_LAB=yes
-    volumes:
-      - .:/home/jovyan/work
+    image: jupyter/scipy-notebook:latest
     ports:
       - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+    environment:
+      - JUPYTER_TOKEN=stresslab
     networks:
-      - stress-net
-    restart: unless-stopped
-
-networks:
-  stress-net:
-    driver: bridge
+      - stress-net  # 👈 Conectado a la red
 
 volumes:
   pgdata:
-    driver: local
+
+# 🖧 LA NUEVA SECCIÓN QUE UNE TODO:
+networks:
+  stress-net:
+    driver: bridge
