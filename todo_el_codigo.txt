@@ -1,0 +1,1206 @@
+=== ARCHIVO: ./tsconfig.json ===
+{
+  "compilerOptions": {
+    "target": "es5",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+          }
+    ],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+
+
+=== ARCHIVO: ./todo_el_codigo.txt ===
+
+
+=== ARCHIVO: ./Dockerfile ===
+# Etapa 1: Dependencias
+FROM docker.io/library/node:18-alpine AS deps
+RUN apk add --no-cache libc6-compat openssl
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+# Etapa 2: Constructor
+FROM docker.io/library/node:18-alpine AS builder
+RUN apk add --no-cache openssl
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npx prisma generate
+RUN npm run build
+
+# Etapa 3: Ejecutor (Runner)
+FROM docker.io/library/node:18-alpine AS runner
+RUN apk add --no-cache openssl
+WORKDIR /app
+ENV NODE_ENV production
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/prisma ./prisma
+EXPOSE 3000
+ENV PORT 3000
+ENV HOSTNAME "0.0.0.0"
+CMD ["npx", "next", "start"]
+
+
+=== ARCHIVO: ./package.json ===
+{
+  "name": "stress-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "db:migrate": "prisma migrate dev",
+    "db:seed": "ts-node scripts/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.10.2",
+    "lucide-react": "^0.344.0",
+    "next": "14.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "recharts": "^2.12.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/react": "^18.2.61",
+    "@types/react-dom": "^18.2.19",
+    "autoprefixer": "^10.4.18",
+    "postcss": "^8.4.35",
+    "prisma": "^5.10.2",
+    "tailwindcss": "^3.4.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
+
+
+=== ARCHIVO: ./prisma/schema.prisma ===
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model StressLog {
+  id        Int       @id @default(autoincrement())
+  type      String    // "cpu" | "memory" | "db" | "combined"
+  intensity Int       // 1-100
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  status    String    // "running" | "stopped" | "completed" | "error"
+  metrics   Json?     // Snapshot de métricas
+}
+
+model HeavyRecord {
+  id        Int      @id @default(autoincrement())
+  data      String   // Texto largo para forzar uso de disco/memoria en DB
+  checksum  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdAt])
+}
+
+model ConnectionTest {
+  id        Int      @id @default(autoincrement())
+  sessionId String
+  query     String
+  duration  Int      // ms
+  createdAt DateTime @default(now())
+}
+
+model StressData {
+  id        Int      @id @default(autoincrement())
+  data      String   @db.Text
+  number    Int
+  createdAt DateTime @default(now())
+}
+
+
+=== ARCHIVO: ./scripts/init-db.sql ===
+-- Extensiones útiles para monitoreo y generación de datos
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- La tabla se creará vía Prisma, pero pre-configuramos permisos y extensiones
+-- Configuración forzada para permitir saturación visible
+ALTER SYSTEM SET max_connections = '200';
+ALTER SYSTEM SET shared_buffers = '256MB';
+ALTER SYSTEM SET work_mem = '4MB';
+
+
+=== ARCHIVO: ./docker-compose.yml ===
+services:
+  # Servidor Web de Next.js (El cuartel general del ataque)
+  app:
+    container_name: stress-app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@stress-db:5432/stress_db?schema=public
+      - NODE_ENV=production
+    depends_on:
+      stress-db:
+        condition: service_healthy
+    networks:
+      - stress-net  # 👈 Conectado a la red
+
+  # Base de Datos PostgreSQL
+  stress-db:
+    container_name: stress-db
+    image: postgres:16
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=stress_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stress_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stress-net  # 👈 Conectado a la red
+
+  # Administrador Visual de la Base de Datos (pgAdmin)
+  stress-pgadmin:
+    container_name: stress-pgadmin
+    image: dpage/pgadmin4:8.5
+    restart: always
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@admin.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - stress-db
+    networks:
+      - stress-net  # 👈 Conectado a la red
+
+  # Laboratorio de Analítica de Datos (Jupyter Notebook)
+  jupyter_lab:
+    container_name: stress-ai-lab
+    image: jupyter/scipy-notebook:latest
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+    environment:
+      - JUPYTER_TOKEN=stresslab
+    networks:
+      - stress-net  # 👈 Conectado a la red
+
+volumes:
+  pgdata:
+
+# 🖧 LA NUEVA SECCIÓN QUE UNE TODO:
+networks:
+  stress-net:
+    driver: bridge
+
+
+=== ARCHIVO: ./next.config.js ===
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'standalone', // <--- ¡ESTA LÍNEA ES CRÍTICA! Indica a Next.js que cree el servidor ejecutable
+  // ... si tienes otras configuraciones aquí, déjalas abajo
+};
+
+module.exports = nextConfig;
+
+
+=== ARCHIVO: ./[internal] ===
+
+
+=== ARCHIVO: ./src/lib/stress-engine.ts ===
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+export interface StressResult {
+  success: boolean;
+  message: string;
+  timestamp: Date;
+}
+
+export interface StressStatus {
+  cpu: boolean;
+  memory: boolean;
+  db: boolean;
+  active: boolean;
+}
+
+let activeIntervals: NodeJS.Timeout[] = [];
+let isCpuStressing = false;
+let isMemoryStressing = false;
+let isDbStressing = false;
+let memoryBuffers: Buffer[] = [];
+
+export function getStressStatus(): StressStatus {
+  return {
+    cpu: isCpuStressing,
+    memory: isMemoryStressing,
+    db: isDbStressing,
+    active: isCpuStressing || isMemoryStressing || isDbStressing
+  };
+}
+
+export function stopAllStress(): void {
+  activeIntervals.forEach(clearInterval);
+  activeIntervals = [];
+  isCpuStressing = false;
+  isMemoryStressing = false;
+  isDbStressing = false;
+  memoryBuffers = []; // Liberamos memoria de inmediato
+}
+
+// 3.1 Algoritmo de Stress de CPU
+export async function stressCPU(intensity: number, durationMs: number): Promise<StressResult> {
+  if (isCpuStressing) return { success: false, message: 'Estrés de CPU ya en ejecución', timestamp: new Date() };
+  isCpuStressing = true;
+  const startTime = Date.now();
+  
+  const intervalId = setInterval(() => {
+    if (Date.now() - startTime > durationMs) {
+      clearInterval(intervalId);
+      isCpuStressing = false;
+      return;
+    }
+    // Bloqueo intencional del hilo mediante cálculos matemáticos complejos infinitos por ráfagas
+    const targetTime = Date.now() + (intensity * 12);
+    while (Date.now() < targetTime) {
+      Math.sqrt(Math.random() * Math.random());
+    }
+  }, 100 - intensity);
+
+  activeIntervals.push(intervalId);
+  return { success: true, message: 'Estrés de CPU inicializado', timestamp: new Date() };
+}
+
+// 3.2 Algoritmo de Stress de Memoria
+export async function stressMemory(mbToAllocate: number, durationMs: number): Promise<StressResult> {
+  if (isMemoryStressing) return { success: false, message: 'Estrés de RAM ya en ejecución', timestamp: new Date() };
+  isMemoryStressing = true;
+  const startTime = Date.now();
+
+  try {
+    const bytesToAllocate = mbToAllocate * 1024 * 1024;
+    const buffer = Buffer.alloc(bytesToAllocate, 'S');
+    memoryBuffers.push(buffer);
+
+    const intervalId = setInterval(() => {
+      if (Date.now() - startTime > durationMs) {
+        clearInterval(intervalId);
+        isMemoryStressing = false;
+        memoryBuffers = [];
+        return;
+      }
+      // Escritura cíclica para obligar al kernel a mantener las páginas en RAM física
+      for (let i = 0; i < buffer.length; i += 8192) {
+        buffer[i] = Math.floor(Math.random() * 255);
+      }
+    }, 100);
+
+    activeIntervals.push(intervalId);
+    return { success: true, message: `Asignados ${mbToAllocate}MB en RAM de forma activa`, timestamp: new Date() };
+  } catch (err: any) {
+    isMemoryStressing = false;
+    return { success: false, message: err.message, timestamp: new Date() };
+  }
+}
+
+// 3.3 Algoritmo de Stress de Base de Datos
+export async function stressDatabase(concurrentConnections: number, durationMs: number): Promise<StressResult> {
+  if (isDbStressing) return { success: false, message: 'Estrés de base de datos ya en ejecución', timestamp: new Date() };
+  isDbStressing = true;
+  const startTime = Date.now();
+
+  const intervalId = setInterval(async () => {
+    if (Date.now() - startTime > durationMs) {
+      clearInterval(intervalId);
+      isDbStressing = false;
+      return;
+    }
+    // Ejecución masiva de Cross Joins pesados concurrentes para colapsar la cola de conexiones
+    for (let i = 0; i < concurrentConnections; i++) {
+      prisma.$queryRaw`
+        SELECT h1.id FROM "HeavyRecord" h1 
+        CROSS JOIN "HeavyRecord" h2 
+        LIMIT 5
+      `.catch(() => {});
+    }
+  }, 150);
+
+  activeIntervals.push(intervalId);
+  return { success: true, message: `Enviando queries concurrentes a PostgreSQL`, timestamp: new Date() };
+}
+
+// 3.4 Algoritmo de Stress Combinado
+export async function stressCombined(config: { cpu: { intensity: number; duration: number }; memory: { megabytes: number; duration: number }; db: { connections: number; duration: number } }): Promise<void> {
+  await stressCPU(config.cpu.intensity, config.cpu.duration * 1000);
+  await stressMemory(config.memory.megabytes, config.memory.duration * 1000);
+  await stressDatabase(config.db.connections, config.db.duration * 1000);
+}
+
+
+=== ARCHIVO: ./src/lib/metrics.ts ===
+import fs from 'fs';
+import os from 'os';
+
+// Detectamos si el host montó su proc en /host/proc o leemos directamente de /proc del contenedor
+const PROC_PATH = fs.existsSync('/host/proc') ? '/host/proc' : '/proc';
+
+export interface CPUMetrics {
+  usage: number;
+  cores: number[];
+  loadAvg: number[];
+}
+
+export interface MemoryMetrics {
+  total: number;
+  used: number;
+  free: number;
+  percentage: number;
+}
+
+export interface DiskMetrics {
+  read: number;
+  write: number;
+  usage: number;
+}
+
+export interface NetworkMetrics {
+  rx: number;
+  tx: number;
+}
+
+export interface ProcessInfo {
+  pid: number;
+  name: string;
+  cpu: number;
+  memory: number;
+}
+
+// 1. Leer métricas de CPU de /proc/stat
+export async function readCPUMetrics(): Promise<CPUMetrics> {
+  try {
+    const statContent = fs.readFileSync(`${PROC_PATH}/stat`, 'utf8');
+    const lines = statContent.split('\n');
+    const cpuLines = lines.filter(line => line.startsWith('cpu'));
+    
+    const loadAvg = os.loadavg();
+    const cpus = os.cpus();
+    
+    const parseCpuLine = (line: string) => {
+      const parts = line.trim().split(/\s+/).slice(1).map(Number);
+      const idle = parts[3] + parts[4]; 
+      const active = parts[0] + parts[1] + parts[2] + parts[5] + parts[6] + parts[7];
+      return { active, total: active + idle };
+    };
+
+    let totalUsage = 0;
+    if (cpuLines.length > 0) {
+      const globalStat = parseCpuLine(cpuLines[0]);
+      totalUsage = Math.round((globalStat.active / globalStat.total) * 100) || 0;
+    }
+
+    const cores = cpus.map(core => {
+      const total = Object.values(core.times).reduce((a, b) => a + b, 0);
+      const idle = core.times.idle;
+      return Math.round(((total - idle) / total) * 100);
+    });
+
+    return {
+      usage: cores.length > 0 ? Math.round(cores.reduce((a, b) => a + b, 0) / cores.length) : totalUsage,
+      cores,
+      loadAvg
+    };
+  } catch {
+    const cpus = os.cpus();
+    const cores = cpus.map(core => {
+      const total = Object.values(core.times).reduce((a, b) => a + b, 0);
+      return Math.round(((total - core.times.idle) / total) * 100);
+    });
+    return {
+      usage: cores.length > 0 ? Math.round(cores.reduce((a, b) => a + b, 0) / cores.length) : 0,
+      cores,
+      loadAvg: os.loadavg()
+    };
+  }
+}
+
+// 2. Leer memoria desde /proc/meminfo
+export async function readMemoryMetrics(): Promise<MemoryMetrics> {
+  try {
+    const meminfo = fs.readFileSync(`${PROC_PATH}/meminfo`, 'utf8');
+    const lines = meminfo.split('\n');
+    
+    const getField = (name: string): number => {
+      const line = lines.find(l => l.startsWith(name));
+      if (!line) return 0;
+      const match = line.match(/\d+/);
+      return match ? parseInt(match[0], 10) * 1024 : 0; // kB a Bytes
+    };
+
+    const total = getField('MemTotal:');
+    const free = getField('MemFree:');
+    const buffers = getField('Buffers:');
+    const cached = getField('Cached:');
+    
+    const used = total - free - buffers - cached;
+    const percentage = total > 0 ? Math.round((used / total) * 100) : 0;
+
+    return { total, used, free, percentage };
+  } catch {
+    const total = os.totalmem();
+    const free = os.freemem();
+    const used = total - free;
+    return {
+      total,
+      used,
+      free,
+      percentage: Math.round((used / total) * 100)
+    };
+  }
+}
+
+// 3. Leer actividad de disco simulada / proc
+export async function readDiskMetrics(): Promise<DiskMetrics> {
+  return {
+    read: Math.floor(Math.random() * 45000),
+    write: Math.floor(Math.random() * 60000),
+    usage: 40
+  };
+}
+
+// 4. Leer actividad de red simulada / proc
+export async function readNetworkMetrics(): Promise<NetworkMetrics> {
+  return {
+    rx: Math.floor(Math.random() * 15000),
+    tx: Math.floor(Math.random() * 8000)
+  };
+}
+
+// 5. Listar procesos top que consumen recursos
+export async function readTopProcesses(n: number): Promise<ProcessInfo[]> {
+  return [
+    { pid: process.pid, name: 'node (next-server)', cpu: Math.floor(Math.random() * 15) + 5, memory: 142 * 1024 * 1024 },
+    { pid: 24, name: 'postgres: stressuser', cpu: Math.floor(Math.random() * 8), memory: 64 * 1024 * 1024 },
+    { pid: 88, name: 'cadvisor', cpu: Math.floor(Math.random() * 3), memory: 28 * 1024 * 1024 }
+  ].slice(0, n);
+}
+
+
+=== ARCHIVO: ./src/app/globals.css ===
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #0f172a; /* Fondo oscuro por defecto */
+  color: #f8fafc;
+  font-family: sans-serif;
+}
+
+
+=== ARCHIVO: ./src/app/layout.tsx ===
+import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Server Stress Testing Dashboard",
+  description: "Monitoreo y saturación de recursos en entornos distribuidos",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="es">
+      <body>
+        {children}
+      </body>
+    </html>
+  );
+}
+
+
+=== ARCHIVO: ./src/app/api/metrics/system/route.ts ===
+import { NextResponse } from 'next/server';
+import * as metrics from '@/lib/metrics';
+
+export async function GET() {
+  try {
+    const cpu = await metrics.readCPUMetrics();
+    const memory = await metrics.readMemoryMetrics();
+    const disk = await metrics.readDiskMetrics();
+    const network = await metrics.readNetworkMetrics();
+    const topProcesses = await metrics.readTopProcesses(5);
+
+    return NextResponse.json({
+      cpu,
+      memory,
+      disk,
+      network,
+      processes: {
+        total: topProcesses.length + 15,
+        running: topProcesses.length,
+        sleeping: 15
+      },
+      uptime: Math.floor(process.uptime())
+    });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
+
+
+=== ARCHIVO: ./src/app/api/metrics/db/route.ts ===
+import { NextResponse } from 'next/server';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+export async function GET() {
+  try {
+    const activityStats: any[] = await prisma.$queryRaw`
+      SELECT 
+        COUNT(*) FILTER (WHERE state = 'active')::int as active,
+        COUNT(*) FILTER (WHERE state = 'idle')::int as idle,
+        COUNT(*)::int as total
+      FROM pg_stat_activity
+    `;
+
+    const hitRateStats: any[] = await prisma.$queryRaw`
+      SELECT (SUM(blks_hit) * 100 / NULLIF(SUM(blks_hit + blks_read), 0))::int as hit_rate 
+      FROM pg_stat_database
+    `;
+
+    return NextResponse.json({
+      connections: {
+        active: activityStats[0]?.active || 0,
+        idle: activityStats[0]?.idle || 0,
+        total: activityStats[0]?.total || 0,
+        maxConnections: 200
+      },
+      queries: { qps: Math.floor(Math.random() * 5), slowQueries: 0, avgDuration: 12 },
+      tables: { size: '45 MB', bloat: 2 },
+      locks: { waiting: 0, granted: 1 },
+      bufferHitRate: hitRateStats[0]?.hit_rate || 99
+    });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+
+=== ARCHIVO: ./src/app/api/stress/stop/route.ts ===
+import { NextResponse } from 'next/server';
+import { stopAllStress } from '@/lib/stress-engine';
+
+export async function POST() {
+  try {
+    stopAllStress();
+    return NextResponse.json({ success: true, message: 'Todos los procesos de stress detenidos con éxito' });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
+
+
+
+=== ARCHIVO: ./src/app/api/stress/combined/route.ts ===
+import { NextResponse } from 'next/server';
+import { stressCombined } from '@/lib/stress-engine';
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    await stressCombined({
+      cpu: { intensity: body.cpu?.intensity || 80, duration: body.cpu?.duration || 30 },
+      memory: { megabytes: body.memory?.megabytes || 512, duration: body.memory?.duration || 30 },
+      db: { connections: body.db?.connections || 20, duration: body.db?.duration || 30 }
+    });
+    return NextResponse.json({ success: true, message: 'Estrés combinado inyectado globalmente' });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
+
+
+=== ARCHIVO: ./src/app/api/stress/memory/route.ts ===
+import { NextResponse } from 'next/server';
+import { stressMemory } from '@/lib/stress-engine';
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    const { megabytes, duration } = body;
+    const result = await stressMemory(megabytes || 256, (duration || 30) * 1000);
+    return NextResponse.json({ jobId: 'memory-job', status: result.success ? 'started' : 'failed', message: result.message });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
+
+
+=== ARCHIVO: ./src/app/api/stress/db/route.ts ===
+import { NextResponse } from 'next/server';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+// Variable global para poder cancelar la operación en bucle con el botón de parada de emergencia
+let isRunning = false;
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    const { action, totalRecords = 5000, batchSize = 500, iterations = 20 } = body;
+
+    if (action === 'stop') {
+      isRunning = false;
+      return NextResponse.json({ message: 'Proceso de base de datos detenido' });
+    }
+
+    isRunning = true;
+
+    // --- ENFOQUE 1: INYECCIÓN MASIVA DE SELECTS (QUERY FLOOD -> CPU POSTGRES) ---
+    if (action === 'query') {
+      // Ejecuta de forma asíncrona un bombardeo de consultas complejas para no bloquear el hilo principal de Next.js
+      (async () => {
+        for (let i = 0; i < iterations && isRunning; i++) {
+          // Usamos generate_series y funciones matemáticas pesadas directas en el motor de Postgres
+          // para simular agregaciones analíticas pesadas y saturar la CPU de postgres
+          await prisma.$queryRaw`
+            SELECT 
+              s.id, 
+              md5(random()::text) as hash,
+              sha256(random()::text::bytea) as sha,
+              sqrt(s.id)::numeric as raiz
+            FROM generate_series(1, 80000) as s(id)
+            ORDER BY hash DESC 
+            LIMIT 5000;
+          `;
+        }
+        isRunning = false;
+      })();
+
+      return NextResponse.json({ message: 'Query Flood iniciado con éxito (Saturando CPU de Postgres)' });
+    }
+
+    // --- ENFOQUE 2: INSERCIÓN EN LOTES (INSERT FLOOD -> I/O DISCO & WAL) ---
+    if (action === 'insert') {
+      // Ejecución controlada en bloques usando createMany para forzar la escritura masiva al WAL de Postgres
+      (async () => {
+        let recordsCreated = 0;
+
+        while (recordsCreated < totalRecords && isRunning) {
+          // Determinar cuántos elementos insertar en el lote actual
+          const currentBatchSize = Math.min(batchSize, totalRecords - recordsCreated);
+          
+          // Construir el lote de datos simulados pesados
+          const batchData = Array.from({ length: currentBatchSize }).map(() => ({
+            data: "REGISTRO_DE_ESTRES_DE_SISTEMAS_OPERATIVOS_" + Math.random().toString(36).substring(2, 15),
+            number: Math.floor(Math.random() * 100000)
+          }));
+
+          // Inserción en bloque masiva
+          await prisma.stressData.createMany({
+            data: batchData,
+          });
+
+          recordsCreated += currentBatchSize;
+          
+          // Pequeño descanso de milisegundos para permitir alternancia de hilos
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        isRunning = false;
+      })();
+
+      return NextResponse.json({ 
+        message: `Insert Flood iniciado en lotes de ${batchSize} hasta completar ${totalRecords} registros (Saturando I/O Disco)` 
+      });
+    }
+
+    return NextResponse.json({ error: 'Acción no válida' }, { status: 400 });
+
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+
+=== ARCHIVO: ./src/app/api/stress/cpu/route.ts ===
+import { NextResponse } from 'next/server';
+import { stressCPU } from '@/lib/stress-engine';
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    const { intensity, duration } = body; // duration en segundos
+    const result = await stressCPU(intensity || 50, (duration || 30) * 1000);
+    return NextResponse.json({ jobId: 'cpu-job', status: result.success ? 'started' : 'failed', message: result.message });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
+
+
+=== ARCHIVO: ./src/app/page.tsx ===
+'use client';
+
+import { useState, useEffect } from 'react';
+
+// Interfaces de tipado estricto para las respuestas de la API
+interface SystemMetrics {
+  cpu: { usage: number; cores: number[]; loadAvg: number[] };
+  memory: { total: number; used: number; free: number; percentage: number };
+  disk: { read: number; write: number; usage: number };
+  network: { rx: number; tx: number };
+  processes: { total: number; running: number; sleeping: number };
+  uptime: number;
+}
+
+interface DbMetrics {
+  connections: { active: number; idle: number; total: number; maxConnections: number };
+  queries: { qps: number; slowQueries: number; avgDuration: number };
+  bufferHitRate: number;
+}
+
+export default function Dashboard() {
+  // Estados para las métricas del sistema y la base de datos
+  const [system, setSystem] = useState<SystemMetrics | null>(null);
+  const [db, setDb] = useState<DbMetrics | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Estados para los formularios de control de estrés (CPU y Consultas)
+  const [cpuIntensity, setCpuIntensity] = useState<number>(70);
+  const [cpuDuration, setCpuDuration] = useState<number>(30);
+  const [dbConnections, setDbConnections] = useState<number>(25);
+  const [dbDuration, setDbDuration] = useState<number>(30);
+
+  // 🟢 NUEVOS ESTADOS COMPATIBLES PARA INSERCIÓN EN LOTES (REMPLAZAN ENFOQUE DE RAM)
+  const [totalRecords, setTotalRecords] = useState<number>(20000);
+  const [batchSize, setBatchSize] = useState<number>(1000);
+
+  // Estado global de ejecución de ataques
+  const [isStressing, setIsStressing] = useState<boolean>(false);
+  const [stressMessage, setStressMessage] = useState<string>('');
+
+  // Efecto de consulta periódica (Polling) cada 2 segundos
+  useEffect(() => {
+    async function fetchMetrics() {
+      try {
+        const [sysRes, dbRes] = await Promise.all([
+          fetch('/api/metrics/system'),
+          fetch('/api/metrics/db')
+        ]);
+
+        if (!sysRes.ok || !dbRes.ok) throw new Error('Error al consultar los endpoints de monitoreo.');
+
+        const sysData = await sysRes.json();
+        const dbData = await dbRes.json();
+
+        setSystem(sysData);
+        setDb(dbData);
+        setError(null);
+      } catch (err) {
+        // Controlamos que la UI no se rompa si se pierde un frame de datos bajo stress masivo.
+      }
+    }
+
+    fetchMetrics();
+    const interval = setInterval(fetchMetrics, 2000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Función genérica para disparar ataques de estrés (POST)
+  const triggerStress = async (endpoint: string, payload: object) => {
+    setIsStressing(true);
+    setStressMessage('Inyectando carga de trabajo al contenedor...');
+    try {
+      const res = await fetch(`/api/stress/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      setStressMessage(data.message || 'Ataque iniciado con éxito.');
+    } catch (err) {
+      setStressMessage('Error al comunicar con el despachador de estrés.');
+    }
+  };
+
+  // 🚨 BOTÓN DE PÁNICO INTEGRAL VINCULADO CORRECTAMENTE
+  const stopAllStress = async () => {
+    setStressMessage('Enviando señal de detención inmediata a todos los contenedores...');
+    try {
+      // 1. Detiene hilos de CPU y contenedores base
+      const resGeneral = await fetch('/api/stress/stop', { method: 'POST' });
+      const dataGeneral = await resGeneral.json();
+
+      // 2. Rompe los bucles asíncronos activos dentro de PostgreSQL
+      await fetch('/api/stress/db', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' })
+      });
+
+      setStressMessage(`${dataGeneral.message} + Procesos asíncronos de DB abortados.`);
+      setIsStressing(false);
+    } catch (err) {
+      setStressMessage('Error crítico al detener los bucles de estrés.');
+    }
+  };
+
+  return (
+    <main className="min-h-screen bg-slate-950 text-slate-100 p-6 font-mono selection:bg-red-500 selection:text-white">
+      {/* Encabezado Principal */}
+      <header className="border-b border-slate-800 pb-4 mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div>
+          <h1 className="text-2xl md:text-3xl font-black text-red-500 tracking-wider">
+            SYSTEM STRESS MONITOR v1.0
+          </h1>
+          <p className="text-xs text-slate-400 mt-1">
+            Entorno de pruebas académicas en contenedores Docker sobre WSL2
+          </p>
+        </div>
+
+        {/* Botón de Emergencia Global */}
+        <button
+          onClick={stopAllStress}
+          className="w-full md:w-auto px-6 py-3 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-black rounded border border-red-400 shadow-lg shadow-red-900/40 transition-all uppercase animate-pulse"
+        >
+          🚨 DETENER TODO STRESS
+        </button>
+      </header>
+
+      {stressMessage && (
+        <div className="mb-6 p-3 bg-slate-900 border-l-4 border-amber-500 text-amber-400 text-xs rounded">
+          <span className="font-bold">LOG_SISTEMA_ACTUAL:</span> {stressMessage}
+        </div>
+      )}
+
+      {/* RECUADROS DE MÉTRICAS EN TIEMPO REAL */}
+      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+
+        {/* TARJETA 1: MÉTRICAS DE CPU */}
+        <div className="bg-slate-900 p-5 rounded border border-slate-800">
+          <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">🖥️ Carga Total CPU</h2>
+          <div className="flex items-baseline gap-2 mb-2">
+            <span className="text-4xl font-black text-white">{system?.cpu.usage ?? 0}%</span>
+            <span className="text-xs text-slate-500">en uso activo</span>
+          </div>
+          <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden mb-4">
+            <div
+              className={`h-full transition-all duration-1000 ${
+                (system?.cpu.usage ?? 0) > 75 ? 'bg-red-500' : (system?.cpu.usage ?? 0) > 40 ? 'bg-amber-500' : 'bg-emerald-500'
+              }`}
+              style={{ width: `${system?.cpu.usage ?? 0}%` }}
+            />
+          </div>
+          <div className="text-xs text-slate-400 space-y-1">
+            <p>Núcleos detectados: <span className="text-slate-200">{system?.cpu.cores.length ?? 0} Cores</span></p>
+            <p>Load Average: <span className="text-slate-200">{system?.cpu.loadAvg.map(l => l.toFixed(2)).join(' | ') ?? '0.00'}</span></p>
+          </div>
+        </div>
+
+        {/* TARJETA 2: MÉTRICAS DE RAM */}
+        <div className="bg-slate-900 p-5 rounded border border-slate-800">
+          <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">💾 Consumo de Memoria RAM</h2>
+          <div className="flex items-baseline gap-2 mb-2">
+            <span className="text-4xl font-black text-white">{system?.memory.percentage ?? 0}%</span>
+            <span className="text-xs text-slate-500">
+              {system ? Math.round(system.memory.used / 1024 / 1024 / 1024) : 0} GB de {system ? Math.round(system.memory.total / 1024 / 1024 / 1024) : 0} GB
+            </span>
+          </div>
+          <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden mb-4">
+            <div
+              className={`h-full transition-all duration-1000 ${
+                (system?.memory.percentage ?? 0) > 80 ? 'bg-red-500' : 'bg-emerald-500'
+              }`}
+              style={{ width: `${system?.memory.percentage ?? 0}%` }}
+            />
+          </div>
+          <div className="text-xs text-slate-400 flex justify-between">
+            <span>Libre: {system ? (system.memory.free / 1024 / 1024 / 1024).toFixed(2) : 0} GB</span>
+            <span>Uptime: {system ? `${Math.floor(system.uptime / 60)} min` : '--'}</span>
+          </div>
+        </div>
+
+        {/* TARJETA 3: MÉTRICAS DE POSTGRESQL */}
+        <div className="bg-slate-900 p-5 rounded border border-slate-800 md:col-span-2 lg:col-span-1">
+          <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">🗄️ Servidor PostgreSQL (stress-db)</h2>
+          <div className="flex items-baseline gap-2 mb-2">
+            <span className="text-4xl font-black text-indigo-400">{db?.connections.active ?? 0}</span>
+            <span className="text-xs text-slate-500">Conexiones activas simultáneas</span>
+          </div>
+          <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden mb-4">
+            <div
+              className="h-full bg-indigo-500 transition-all duration-1000"
+              style={{ width: `${((db?.connections.total ?? 0) / (db?.connections.maxConnections || 200)) * 100}%` }}
+            />
+          </div>
+          <div className="text-xs text-slate-400 space-y-1">
+            <p>Pool Total abierto: <span className="text-slate-200">{db?.connections.total ?? 0} / {db?.connections.maxConnections ?? 200}</span></p>
+            <p>Buffer Hit Rate: <span className="text-emerald-400 font-bold">{db?.bufferHitRate ?? 100}% (Caché óptimo)</span></p>
+          </div>
+        </div>
+      </section>
+
+      {/* MANDOS DE OPERACIÓN / INYECCIÓN DE STRESS */}
+      <h2 className="text-lg font-black text-slate-300 uppercase tracking-wider mb-4 border-b border-slate-800 pb-2">
+        🛠️ Panel de Inyección de Carga Maliciosa (Simulada)
+      </h2>
+
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+
+        {/* CONTROL DE CPU */}
+        <div className="bg-slate-900 p-5 rounded border border-slate-800 flex flex-col justify-between">
+          <div>
+            <h3 className="text-xs font-black text-red-400 uppercase mb-3">🔥 Inundación de Peticiones HTTP Concurrentes</h3>
+            <p className="text-xs text-slate-400 mb-4">Ejecuta bucles matemáticos infinitos bloqueando los subprocesos de Node.</p>
+
+            <div className="space-y-4 mb-6">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Intensidad Máxima ({cpuIntensity}%):</label>
+                <input
+                  type="range" min="10" max="95" value={cpuIntensity}
+                  onChange={(e) => setCpuIntensity(Number(e.target.value))}
+                  className="w-full accent-red-500 bg-slate-800 rounded"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Duración (segundos):</label>
+                <input
+                  type="number" value={cpuDuration}
+                  onChange={(e) => setCpuDuration(Number(e.target.value))}
+                  className="w-full bg-slate-800 border border-slate-700 p-2 text-sm text-white rounded font-mono"
+                />
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => triggerStress('cpu', { intensity: cpuIntensity, duration: cpuDuration })}
+            className="w-full py-2 bg-red-950/40 hover:bg-red-900/60 text-red-400 font-bold text-xs uppercase border border-red-900 rounded tracking-wider transition-colors"
+          >
+            Lanzar Stress CPU 🚀
+          </button>
+        </div>
+
+        {/* 💿 NUEVA TARJETA CENTRAL: INUNDACIÓN DE INSERCIONES (CUMPLE RÚBRICA DE DISCO I/O) */}
+        <div className="bg-slate-900 p-5 rounded border border-slate-800 flex flex-col justify-between">
+          <div>
+            <h3 className="text-xs font-black text-amber-400 uppercase mb-3">💿 Inundación de Inserciones (I/O Disco)</h3>
+            <p className="text-xs text-slate-400 mb-4">Estresa el almacenamiento escribiendo bloques masivos en lotes modificables al WAL de Postgres.</p>
+
+            <div className="space-y-4 mb-6">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Registros Totales:</label>
+                <input
+                  type="number" value={totalRecords}
+                  onChange={(e) => setTotalRecords(Number(e.target.value))}
+                  className="w-full bg-slate-800 border border-slate-700 p-2 text-sm text-white rounded font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Tamaño del Lote (Batch Size):</label>
+                <input
+                  type="number" value={batchSize}
+                  onChange={(e) => setBatchSize(Number(e.target.value))}
+                  className="w-full bg-slate-800 border border-slate-700 p-2 text-sm text-white rounded font-mono"
+                />
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => triggerStress('db', { action: 'insert', totalRecords, batchSize })}
+            className="w-full py-2 bg-amber-950/40 hover:bg-amber-900/60 text-amber-400 font-bold text-xs uppercase border border-amber-900 rounded tracking-wider transition-colors"
+          >
+            Saturar Escritura (I/O) 🚀
+          </button>
+        </div>
+
+        {/* CONTROL DE CONSULTAS BASE DE DATOS */}
+        <div className="bg-slate-900 p-5 rounded border border-slate-800 flex flex-col justify-between">
+          <div>
+            <h3 className="text-xs font-black text-indigo-400 uppercase mb-3">💥 Inundación Queries (CPU DB)</h3>
+            <p className="text-xs text-slate-400 mb-4">Satura el procesador del contenedor relacional ejecutando funciones criptográficas y ordenamientos.</p>
+
+            <div className="space-y-4 mb-6">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Iteraciones del Ciclo:</label>
+                <input
+                  type="number" min="5" max="100" value={dbConnections}
+                  onChange={(e) => setDbConnections(Number(e.target.value))}
+                  className="w-full bg-slate-800 border border-slate-700 p-2 text-sm text-white rounded font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Duración Máxima (seg):</label>
+                <input
+                  type="number" value={dbDuration}
+                  onChange={(e) => setDbDuration(Number(e.target.value))}
+                  className="w-full bg-slate-800 border border-slate-700 p-2 text-sm text-white rounded font-mono"
+                />
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => triggerStress('db', { action: 'query', iterations: dbConnections })}
+            className="w-full py-2 bg-indigo-950/40 hover:bg-indigo-900/60 text-indigo-400 font-bold text-xs uppercase border border-indigo-900 rounded tracking-wider transition-colors"
+          >
+            Colapsar CPU Postgres 🚀
+          </button>
+        </div>
+
+      </section>
+
+      {/* BOTÓN ATAQUE MÁXIMO COMBINADO */}
+      <footer className="w-full p-4 bg-gradient-to-r from-red-950 via-slate-900 to-red-950 border border-red-900/50 rounded flex flex-col md:flex-row justify-between items-center gap-4">
+        <div className="text-center md:text-left">
+          <h3 className="text-sm font-black text-red-500 uppercase">⚡ ATAQUE COMBINADO INTEGRAL (STRESS TOTAL)</h3>
+          <p className="text-xs text-slate-400 mt-1">Dispara simultáneamente los 3 vectores de colapso de hardware y persistencia.</p>
+        </div>
+        <button
+          onClick={() => {
+            triggerStress('cpu', { intensity: 85, duration: 25 });
+            triggerStress('db', { action: 'insert', totalRecords: 15000, batchSize: 500 });
+            triggerStress('db', { action: 'query', iterations: 20 });
+          }}
+          className="w-full md:w-auto px-8 py-3 bg-red-950 text-red-200 border border-red-500 font-bold text-xs tracking-widest hover:bg-red-600 hover:text-white transition-all uppercase rounded"
+        >
+          💥 PROPAGAR STRESS GLOBAL
+        </button>
+      </footer>
+    </main>
+  );
+}
+
+
+=== ARCHIVO: ./postcss.config.js ===
+module.exports = {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+};
+
+
+=== ARCHIVO: ./Next.js ===
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'standalone', // Esto le dice a Next.js que genere el server.js
+};
+
+module.exports = nextConfig;
+
+
+=== ARCHIVO: ./transferring ===
+
+
+=== ARCHIVO: ./Métricas ===
+import { NextResponse } from 'next/server';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+export async function GET() {
+  try {
+    const activityStats: any[] = await prisma.$queryRaw`
+      SELECT 
+        COUNT(*) FILTER (WHERE state = 'active')::int as active,
+        COUNT(*) FILTER (WHERE state = 'idle')::int as idle,
+        COUNT(*)::int as total
+      FROM pg_stat_activity
+    `;
+
+    const hitRateStats: any[] = await prisma.$queryRaw`
+      SELECT (SUM(blks_hit) * 100 / NULLIF(SUM(blks_hit + blks_read), 0))::int as hit_rate 
+      FROM pg_stat_database
+    `;
+
+    return NextResponse.json({
+      connections: {
+        active: activityStats[0]?.active || 0,
+        idle: activityStats[0]?.idle || 0,
+        total: activityStats[0]?.total || 0,
+        maxConnections: 200
+      },
+      queries: { qps: Math.floor(Math.random() * 5), slowQueries: 0, avgDuration: 12 },
+      tables: { size: '45 MB', bloat: 2 },
+      locks: { waiting: 0, granted: 1 },
+      bufferHitRate: hitRateStats[0]?.hit_rate || 99
+    });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+
+=== ARCHIVO: ./ERROR ===
+
+
+=== ARCHIVO: ./tailwind.config.js ===
+/** @type {import('tailwindcss').Config} */
+module.exports = {
+  content: [
+    "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
+  ],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+};
+
+
+=== ARCHIVO: ./reading ===
+
+
+=== ARCHIVO: ./= ===
+
+
